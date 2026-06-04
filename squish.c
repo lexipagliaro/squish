@@ -7,16 +7,16 @@ int main(int argc, char* argv[]) {
 
     do {
         printf("%s-~> %s", GREEN, RESET);
-        line = read();
-        args = split(line);
-        status = execute(args);
+        line = sq_read();
+        args = sq_split(line);
+        status = sq_execute(args);
         
         free(line);
         free(args);
     } while (status);
 }
 
-char* read(void) {
+char* sq_read(void) {
     char* line = NULL;
     size_t bufsize = 0;
 
@@ -28,7 +28,7 @@ char* read(void) {
             exit(EXIT_SUCCESS); 
         } else { /* some unexpected error */
             free(line);
-            fprintf(stderr, "%sfailed to read command line: %s%s\n", GREEN, strerror(errno), RESET);
+            perror("failed to read command line");
             exit(EXIT_FAILURE);
         }
     }
@@ -41,7 +41,7 @@ char* read(void) {
  * in earlier functions/referenced in main! fix!
  */
 
-char** split(char* line) {
+char** sq_split(char* line) {
     int bufsize = 64;
     char* delims = " \t\r\n\a";
     char** tokens = malloc(bufsize * sizeof(char*));
@@ -49,7 +49,7 @@ char** split(char* line) {
     int i = 0;
 
     if (tokens == NULL) {
-        fprintf(stderr, "%sfailed to allocate memory for command line parsing: %s%s\n", GREEN, strerror(errno), RESET);
+        perror("failed to allocate memory for command line parsing");
         exit(EXIT_FAILURE);
     }
 
@@ -64,7 +64,7 @@ char** split(char* line) {
             char** new = realloc(tokens, bufsize * sizeof(char*));
             if (new == NULL) {
                 free(tokens);
-                fprintf(stderr, "%sfailed to reallocate memory for command line parsing: %s%s\n", GREEN, strerror(errno), RESET);
+                perror("failed to reallocate memory for command line parsing");
                 exit(EXIT_FAILURE);
             }
             tokens = new;
@@ -77,6 +77,46 @@ char** split(char* line) {
     return tokens;
 }
 
-int execute(char* args[]) {
+int sq_execute(char* args[]) {
+    char* cmd = args[0];
+    if (cmd == NULL) { // user gave no command
+        return 1; // do nothing and continue shell prompt
+    };
+
+    // if builtin, call the function
+    for (int i = 0; i < NUM_BUILTINS; i++) {
+        if (strcmp(cmd, BUILTINS[i]) == 0) {
+            return (*BUILTIN_FUNCS[i])(args);
+        }
+    }
+
+    // else search for program in path directories and run in new process
+    pid_t pid = fork();
+    if (pid == 0) { // child process
+        if (execvp(cmd, args) == -1) {
+            perror("error executing command");
+            exit(EXIT_FAILURE);
+        }
+    } else if (pid > 0) { // parent process
+        waitpid(pid, NULL, 0); // unblock for exit only - no job control yet
+    } else { // forking error
+        perror("forking error in command execution");
+        exit(EXIT_FAILURE);
+    }
+    return 1; // command done running. continue
+}
+
+// TODO
+int sq_cd(char* args[]) {
+    return 1;
+}
+
+// TODO
+int sq_echo(char* args[]) {
+    return 1;
+}
+
+int sq_exit(char* args[]) {
+    printf("%sbye squish!%s\n", GREEN, RESET);
     return 0;
 }
