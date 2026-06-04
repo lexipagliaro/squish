@@ -28,7 +28,7 @@ char* read(void) {
             exit(EXIT_SUCCESS); 
         } else { /* some unexpected error */
             free(line);
-            perror("failed to read command line");
+            fprintf(stderr, "%sfailed to read command line: %s%s\n", GREEN, strerror(errno), RESET);
             exit(EXIT_FAILURE);
         }
     }
@@ -49,7 +49,7 @@ char** split(char* line) {
     int i = 0;
 
     if (tokens == NULL) {
-        perror("failed to allocate memory during command line parsing");
+        fprintf(stderr, "%sfailed to allocate memory for command line parsing: %s%s\n", GREEN, strerror(errno), RESET);
         exit(EXIT_FAILURE);
     }
 
@@ -64,7 +64,7 @@ char** split(char* line) {
             char** new = realloc(tokens, bufsize * sizeof(char*));
             if (new == NULL) {
                 free(tokens);
-                perror("failed to reallocate memory for command line parsing");
+                fprintf(stderr, "%sfailed to reallocate memory for command line parsing: %s%s\n", GREEN, strerror(errno), RESET);
                 exit(EXIT_FAILURE);
             }
             tokens = new;
