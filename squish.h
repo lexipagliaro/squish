@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -10,8 +11,8 @@
 /** main loop */
 
 char* sq_read(void);
-char** sq_split(char* line);
-int sq_execute(char* args[]);
+char** sq_split(char* line, char** output, char** input);
+int sq_execute(char* args[], char* output, char* input);
 
 /** builtin commands */
 

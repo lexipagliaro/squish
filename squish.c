@@ -1,23 +1,38 @@
 #include "squish.h"
 
+/* 
+    TODO: add input/output redirection 
+        REMAINING: >>, <, <<, <<<
+
+    FIXME: refactor error handling from scattered exits -> centralized cleanup
+    for graceful exit without memory leaks of regions whose pointers are out 
+    of scope
+*/
+
 int main(int argc, char* argv[]) {
     char* line = NULL;
     char** args = NULL;
     int status = 1;
     char* cwd = malloc(BUFSIZ);
+    char* output = NULL;
+    char* input = NULL;
 
     do {
         cwd = getcwd(cwd, BUFSIZ);
         printf("%s%s -~> %s", GREEN, cwd, RESET);
         
         line = sq_read();
-        args = sq_split(line);
-        status = sq_execute(args);
+        args = sq_split(line, &output, &input);
+        status = sq_execute(args, output, input);
+
+        // reset input/output back to stdin/out for next command
+        output = NULL;
+        input = NULL;
         
         free(line);
         free(args);
     } while (status);
-    
+
     free(cwd);
 }
 
@@ -41,12 +56,7 @@ char* sq_read(void) {
     return line;
 }
 
-/** 
- * TODO: current error handling leaks memory! 
- * eg. exiting with error from the split stage leaves *line unfreed
- */
-
-char** sq_split(char* line) {
+char** sq_split(char* line, char** output, char** input) {
     size_t bufsize = BUFSIZ;
     char* delims = " \t\r\n\a";
     char** tokens = malloc(BUFSIZ);
@@ -61,6 +71,11 @@ char** sq_split(char* line) {
     // parse and terminate token list with NULL pointer
     token = strtok(line, delims);
     while (token != NULL) {
+        if (strcmp(token, ">") == 0) {
+            *output = strtok(NULL, delims); // FIXME: once error handling is sorted, cease command parsing/execution here if *output == NULL
+            break;
+        }
+
         tokens[i] = token;
 
         i++;
@@ -82,13 +97,13 @@ char** sq_split(char* line) {
     return tokens;
 }
 
-int sq_execute(char* args[]) {
+int sq_execute(char* args[], char* output, char* input) {
     char* cmd = args[0];
     pid_t pid;
 
     if (cmd == NULL) { // user gave no command
         return 1; // do nothing and continue shell prompt
-    };
+    }
 
     // if builtin, call the function
     for (int i = 0; i < NUM_BUILTINS; i++) {
@@ -100,12 +115,22 @@ int sq_execute(char* args[]) {
     // else search for program in path directories and run in new process
     pid = fork();
     if (pid == 0) { // child process
+        if (output) { // output redirection >
+            int fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd == -1) {
+                perror("failed to open file for output redirection");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+        }
+
         if (execvp(cmd, args) == -1) {
             perror("failed to execute command");
             exit(EXIT_FAILURE); // terminates child - does not quit main shell
         }
     } else if (pid > 0) { // parent process
-        waitpid(pid, NULL, 0); // TODO: unblock for exit only - no job control yet
+        waitpid(pid, NULL, 0);
     } else { // forking error
         perror("failed to fork in command execution");
     }
@@ -123,7 +148,6 @@ int sq_cd(char* args[]) {
         // 2. else if no directory given, change directory to HOME
         path = getenv("HOME"); 
     } else {
-        // TODO: support options and -
         path = args[1];
     }
 
