@@ -4,9 +4,12 @@ int main(int argc, char* argv[]) {
     char* line = NULL;
     char** args = NULL;
     int status = 1;
+    char* cwd = malloc(BUFSIZ);
 
     do {
-        printf("%s-~> %s", GREEN, RESET);
+        cwd = getcwd(cwd, BUFSIZ);
+        printf("%s%s -~> %s", GREEN, cwd, RESET);
+        
         line = sq_read();
         args = sq_split(line);
         status = sq_execute(args);
@@ -14,11 +17,13 @@ int main(int argc, char* argv[]) {
         free(line);
         free(args);
     } while (status);
+    
+    free(cwd);
 }
 
 char* sq_read(void) {
     char* line = NULL;
-    size_t bufsize = 0;
+    size_t bufsize;
 
     /* on failure to read, free line buffer and end shell process */
     if (getline(&line, &bufsize, stdin) == -1) {
@@ -42,9 +47,9 @@ char* sq_read(void) {
  */
 
 char** sq_split(char* line) {
-    int bufsize = 64;
+    size_t bufsize = BUFSIZ;
     char* delims = " \t\r\n\a";
-    char** tokens = malloc(bufsize * sizeof(char*));
+    char** tokens = malloc(BUFSIZ);
     char* token;
     int i = 0;
 
@@ -61,7 +66,7 @@ char** sq_split(char* line) {
         i++;
         if (i == bufsize) { // filled buffer, reallocate with more space
             bufsize *= 2;
-            char** new = realloc(tokens, bufsize * sizeof(char*));
+            char** new = realloc(tokens, bufsize);
             if (new == NULL) {
                 free(tokens);
                 perror("failed to reallocate memory for command line parsing");
@@ -79,6 +84,8 @@ char** sq_split(char* line) {
 
 int sq_execute(char* args[]) {
     char* cmd = args[0];
+    pid_t pid;
+
     if (cmd == NULL) { // user gave no command
         return 1; // do nothing and continue shell prompt
     };
@@ -91,7 +98,7 @@ int sq_execute(char* args[]) {
     }
 
     // else search for program in path directories and run in new process
-    pid_t pid = fork();
+    pid = fork();
     if (pid == 0) { // child process
         if (execvp(cmd, args) == -1) {
             perror("failed to execute command");
@@ -116,6 +123,7 @@ int sq_cd(char* args[]) {
         // 2. else if no directory given, change directory to HOME
         path = getenv("HOME"); 
     } else {
+        // TODO: support options and -
         path = args[1];
     }
 
