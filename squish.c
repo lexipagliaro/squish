@@ -37,8 +37,8 @@ char* sq_read(void) {
 }
 
 /** 
- * later debugging note: exiting from split and execute leaks memory allocated
- * in earlier functions/referenced in main! fix!
+ * TODO: current error handling leaks memory! 
+ * eg. exiting with error from the split stage leaves *line unfreed
  */
 
 char** sq_split(char* line) {
@@ -94,25 +94,35 @@ int sq_execute(char* args[]) {
     pid_t pid = fork();
     if (pid == 0) { // child process
         if (execvp(cmd, args) == -1) {
-            perror("error executing command");
-            exit(EXIT_FAILURE);
+            perror("failed to execute command");
+            exit(EXIT_FAILURE); // terminates child - does not quit main shell
         }
     } else if (pid > 0) { // parent process
-        waitpid(pid, NULL, 0); // unblock for exit only - no job control yet
+        waitpid(pid, NULL, 0); // TODO: unblock for exit only - no job control yet
     } else { // forking error
-        perror("forking error in command execution");
-        exit(EXIT_FAILURE);
+        perror("failed to fork in command execution");
     }
     return 1; // command done running. continue
 }
 
-// TODO
+// https://man7.org/linux/man-pages/man1/cd.1p.html
 int sq_cd(char* args[]) {
-    return 1;
-}
+    char* path;
 
-// TODO
-int sq_echo(char* args[]) {
+    if (args[1] == NULL && getenv("HOME") == NULL) { 
+        // 1. if no directory given and HOME env variable is not defined
+        return 1; 
+    } else if (args[1] == NULL) { 
+        // 2. else if no directory given, change directory to HOME
+        path = getenv("HOME"); 
+    } else {
+        path = args[1];
+    }
+
+    if (chdir(path) == -1) { 
+        perror("failed to change directory"); 
+    }
+
     return 1;
 }
 

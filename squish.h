@@ -16,18 +16,15 @@ int sq_execute(char* args[]);
 /** builtin commands */
 
 int sq_cd(char* args[]);
-int sq_echo(char* args[]);
 int sq_exit(char* args[]);
 
-int NUM_BUILTINS = 3;
+int NUM_BUILTINS = 2;
 char* BUILTINS[] = {
     "cd",
-    "echo",
-    "exit"
+    "exit",
 };
 
 int (*BUILTIN_FUNCS[]) (char* []) = {
     &sq_cd,
-    &sq_echo,
-    &sq_exit
+    &sq_exit,
 };
