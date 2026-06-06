@@ -8,11 +8,18 @@
 #define GREEN "\e[0;92m"
 #define RESET "\e[0m"
 
+typedef struct cmd_t {
+    char** args;      // args[0] = command name, args[1:] = NULL terminated argv
+    char* redirect_t; // > file
+    char* redirect_a; // >> file
+    char* redirect_i; // < file
+} cmd_t;
+
 /** main loop */
 
 char* sq_read(void);
-char** sq_split(char* line, char** output, char** input);
-int sq_execute(char* args[], char* output, char* input);
+void sq_parse(char* line, cmd_t* command); // change to return int later for error handling
+int sq_execute(cmd_t* command);
 
 /** builtin commands */
 

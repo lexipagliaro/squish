@@ -2,7 +2,7 @@
 
 /* 
     TODO: add input/output redirection 
-        REMAINING: >>, <, <<, <<<
+        REMAINING: << (here-documents), <<< (here-strings)
 
     FIXME: refactor error handling from scattered exits -> centralized cleanup
     for graceful exit without memory leaks of regions whose pointers are out 
@@ -11,26 +11,21 @@
 
 int main(int argc, char* argv[]) {
     char* line = NULL;
-    char** args = NULL;
+    cmd_t command = { NULL };
     int status = 1;
     char* cwd = malloc(BUFSIZ);
-    char* output = NULL;
-    char* input = NULL;
 
     do {
         cwd = getcwd(cwd, BUFSIZ);
         printf("%s%s -~> %s", GREEN, cwd, RESET);
         
         line = sq_read();
-        args = sq_split(line, &output, &input);
-        status = sq_execute(args, output, input);
+        sq_parse(line, &command);
+        status = sq_execute(&command);
 
-        // reset input/output back to stdin/out for next command
-        output = NULL;
-        input = NULL;
-        
         free(line);
-        free(args);
+        free(command.args);
+        memset(&command, 0, sizeof(command)); // reset dangling pointer command fields
     } while (status);
 
     free(cwd);
@@ -56,14 +51,14 @@ char* sq_read(void) {
     return line;
 }
 
-char** sq_split(char* line, char** output, char** input) {
+void sq_parse(char* line, cmd_t* command) {
     size_t bufsize = BUFSIZ;
     char* delims = " \t\r\n\a";
-    char** tokens = malloc(BUFSIZ);
+    char** args = malloc(BUFSIZ);
     char* token;
     int i = 0;
 
-    if (tokens == NULL) {
+    if (args == NULL) {
         perror("failed to allocate memory for command line parsing");
         exit(EXIT_FAILURE);
     }
@@ -71,34 +66,50 @@ char** sq_split(char* line, char** output, char** input) {
     // parse and terminate token list with NULL pointer
     token = strtok(line, delims);
     while (token != NULL) {
-        if (strcmp(token, ">") == 0) {
-            *output = strtok(NULL, delims); // FIXME: once error handling is sorted, cease command parsing/execution here if *output == NULL
+        // FIXME: once error handling is sorted, quit command parsing/execution here if no token after redirection symbol
+        if (strcmp(token, ">") == 0) { 
+            command->redirect_t = strtok(NULL, delims); 
+            break;
+        } else if (strcmp(token, ">>") == 0) {
+            command->redirect_a = strtok(NULL, delims); 
+            break;
+        } else if (strcmp(token, "<") == 0) {
+            command->redirect_i = strtok(NULL, delims);
             break;
         }
 
-        tokens[i] = token;
+        args[i] = token;
 
         i++;
         if (i == bufsize) { // filled buffer, reallocate with more space
             bufsize *= 2;
-            char** new = realloc(tokens, bufsize);
+            char** new = realloc(args, bufsize);
             if (new == NULL) {
-                free(tokens);
+                free(args);
                 perror("failed to reallocate memory for command line parsing");
                 exit(EXIT_FAILURE);
             }
-            tokens = new;
+            args = new;
         }
 
         token = strtok(NULL, delims); // NULL -> continue on same str
     }
-    tokens[i] = NULL;
+    args[i] = NULL;
 
-    return tokens;
+    command->args = args;
 }
 
-int sq_execute(char* args[], char* output, char* input) {
-    char* cmd = args[0];
+void redirect(int fd, int replace) {
+    if (fd == -1) {
+        perror("failed to open file for redirection");
+        exit(EXIT_FAILURE);
+    }
+    dup2(fd, replace);
+    close(fd);
+}
+
+int sq_execute(cmd_t* command) {
+    char* cmd = command->args[0];
     pid_t pid;
 
     if (cmd == NULL) { // user gave no command
@@ -108,24 +119,27 @@ int sq_execute(char* args[], char* output, char* input) {
     // if builtin, call the function
     for (int i = 0; i < NUM_BUILTINS; i++) {
         if (strcmp(cmd, BUILTINS[i]) == 0) {
-            return (*BUILTIN_FUNCS[i])(args);
+            return (*BUILTIN_FUNCS[i])(command->args);
         }
     }
 
     // else search for program in path directories and run in new process
     pid = fork();
     if (pid == 0) { // child process
-        if (output) { // output redirection >
-            int fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd == -1) {
-                perror("failed to open file for output redirection");
-                exit(EXIT_FAILURE);
-            }
-            dup2(fd, STDOUT_FILENO);
-            close(fd);
+        int fd;
+        // handle redirection
+        if  (command->redirect_t) { // >
+            fd = open(command->redirect_t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            redirect(fd, STDOUT_FILENO);
+        } else if (command->redirect_a) { // >>
+            fd = open(command->redirect_a, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            redirect(fd, STDOUT_FILENO);
+        } else if (command->redirect_i) { // <
+            fd = open(command->redirect_i, O_RDONLY);
+            redirect(fd, STDIN_FILENO);
         }
 
-        if (execvp(cmd, args) == -1) {
+        if (execvp(cmd, command->args) == -1) {
             perror("failed to execute command");
             exit(EXIT_FAILURE); // terminates child - does not quit main shell
         }
