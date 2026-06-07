@@ -13,6 +13,7 @@ typedef struct cmd_t {
     char* redirect_t; // > file
     char* redirect_a; // >> file
     char* redirect_i; // < file
+    struct cmd_t* pipe;
 } cmd_t;
 
 /** main loop */
