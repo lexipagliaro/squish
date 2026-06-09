@@ -3,10 +3,31 @@
 /* 
     TODO: add << (here-documents), <<< (here-strings)
 
+    TODO: DRY in sq_execute
+
     FIXME: refactor error handling from scattered exits -> centralized cleanup
     for graceful exit without memory leaks of regions whose pointers are out 
     of scope
 */
+
+void sq_reset(cmd_t* command) {
+    free(command->args);
+    command->args = NULL; 
+    command->redirect_t = command->redirect_a = command->redirect_i = NULL;
+
+    // free subsequent heap allocated command structs (and their args)
+    cmd_t *curr = command->pipe;
+    while (curr != NULL) {
+        cmd_t *next = curr->pipe;
+
+        free(curr->args);
+        free(curr);
+
+        curr = next;
+    }
+
+    command->pipe = NULL;
+}
 
 int main(int argc, char* argv[]) {
     char* line = NULL;
@@ -23,8 +44,7 @@ int main(int argc, char* argv[]) {
         status = sq_execute(&command);
 
         free(line);
-        free(command.args);
-        memset(&command, 0, sizeof(command)); // reset dangling pointer command fields
+        sq_reset(&command);
     } while (status);
 
     free(cwd);
@@ -120,7 +140,7 @@ void sq_parse(char* line, cmd_t* command) {
     command->args = args;
 }
 
-void redirect(int fd, int replace) {
+void sq_dup(int fd, int replace) {
     if (fd == -1) {
         perror("failed to open file for redirection");
         exit(EXIT_FAILURE);
@@ -152,13 +172,13 @@ int sq_execute(cmd_t* command) {
             // handle redirection
             if  (command->redirect_t) { // >
                 fd = open(command->redirect_t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                redirect(fd, STDOUT_FILENO);
+                sq_dup(fd, STDOUT_FILENO);
             } else if (command->redirect_a) { // >>
                 fd = open(command->redirect_a, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                redirect(fd, STDOUT_FILENO);
+                sq_dup(fd, STDOUT_FILENO);
             } else if (command->redirect_i) { // <
                 fd = open(command->redirect_i, O_RDONLY);
-                redirect(fd, STDIN_FILENO);
+                sq_dup(fd, STDIN_FILENO);
             }
 
             if (execvp(cmd, command->args) == -1) {
@@ -175,7 +195,8 @@ int sq_execute(cmd_t* command) {
                 pipe(pipe_out);
             }
 
-            if ((pid = fork()) == 0) { // child process
+            pid = fork();
+            if (pid == 0) { // child process
                 // handle pipeline
                 if (pipe_in[0] != -1) { // connect pipe from prev command
                     close(pipe_in[1]); // close write end
@@ -190,13 +211,13 @@ int sq_execute(cmd_t* command) {
                 // handle redirection
                 if  (command->redirect_t) { // >
                     fd = open(command->redirect_t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    redirect(fd, STDOUT_FILENO);
+                    sq_dup(fd, STDOUT_FILENO);
                 } else if (command->redirect_a) { // >>
                     fd = open(command->redirect_a, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                    redirect(fd, STDOUT_FILENO);
+                    sq_dup(fd, STDOUT_FILENO);
                 } else if (command->redirect_i) { // <
                     fd = open(command->redirect_i, O_RDONLY);
-                    redirect(fd, STDIN_FILENO);
+                    sq_dup(fd, STDIN_FILENO);
                 }
 
                 // if builtin, call the function and return from child
