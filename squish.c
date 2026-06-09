@@ -33,10 +33,10 @@ int main(int argc, char* argv[]) {
     char* line = NULL;
     cmd_t command = { NULL };
     int status = 1;
-    char* cwd = malloc(BUFSIZ);
+    char cwd[BUFSIZ];
 
     do {
-        cwd = getcwd(cwd, BUFSIZ);
+        getcwd(cwd, BUFSIZ);
         printf("%s%s -~> %s", GREEN, cwd, RESET);
         
         line = sq_read();
@@ -46,8 +46,6 @@ int main(int argc, char* argv[]) {
         free(line);
         sq_reset(&command);
     } while (status);
-
-    free(cwd);
 }
 
 char* sq_read(void) {
@@ -253,6 +251,7 @@ int sq_execute(cmd_t* command) {
 // https://man7.org/linux/man-pages/man1/cd.1p.html
 int sq_cd(char* args[]) {
     char* path;
+    char old[BUFSIZ];
 
     if (args[1] == NULL && getenv("HOME") == NULL) { 
         // 1. if no directory given and HOME env variable is not defined
@@ -260,12 +259,18 @@ int sq_cd(char* args[]) {
     } else if (args[1] == NULL) { 
         // 2. else if no directory given, change directory to HOME
         path = getenv("HOME"); 
+    } else if (args[1] != NULL && strcmp(args[1], "-") == 0) {
+        // support cd - to return to previous wd
+        path = getenv("OLDPWD");
     } else {
         path = args[1];
     }
 
+    getcwd(old, BUFSIZ);
     if (chdir(path) == -1) { 
         perror("failed to change directory"); 
+    } else {
+        setenv("OLDPWD", old, 1); // FIXME: do anything if this fails?
     }
 
     return 1;
