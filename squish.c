@@ -3,8 +3,6 @@
 /* 
     TODO: add << (here-documents), <<< (here-strings)
 
-    TODO: DRY in sq_execute
-
     FIXME: refactor error handling from scattered exits -> centralized cleanup
     for graceful exit without memory leaks of regions whose pointers are out 
     of scope
@@ -95,7 +93,7 @@ void sq_parse(char* line, cmd_t* command) {
         if (strcmp(token, "<") == 0) {
             command->redirect_i = strtok(NULL, delims);
             break;
-        }
+        } 
 
         if (strcmp(token, "|") == 0) {
             // finish argv for pipe input command
@@ -138,6 +136,15 @@ void sq_parse(char* line, cmd_t* command) {
     command->args = args;
 }
 
+int sq_builtin(cmd_t* command) {
+    for (int i = 0; i < NUM_BUILTINS; i++) {
+        if (strcmp(command->args[0], BUILTINS[i]) == 0) {
+            return (*BUILTIN_FUNCS[i])(command->args);
+        }
+    }
+    return -1;
+}
+
 void sq_dup(int fd, int replace) {
     if (fd == -1) {
         perror("failed to open file for redirection");
@@ -147,6 +154,27 @@ void sq_dup(int fd, int replace) {
     close(fd);
 }
 
+void sq_redirection(cmd_t* command) {
+    int fd;
+    if  (command->redirect_t) { // >
+        fd = open(command->redirect_t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        sq_dup(fd, STDOUT_FILENO);
+    } else if (command->redirect_a) { // >>
+        fd = open(command->redirect_a, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        sq_dup(fd, STDOUT_FILENO);
+    } else if (command->redirect_i) { // <
+        fd = open(command->redirect_i, O_RDONLY);
+        sq_dup(fd, STDIN_FILENO);
+    }
+}
+
+void sq_exec(cmd_t* command) {
+    if (execvp(command->args[0], command->args) == -1) {
+        perror("failed to execute command");
+        exit(EXIT_FAILURE); // terminates child - does not quit main shell
+    }
+}
+
 int sq_execute(cmd_t* command) {
     char* cmd;
     pid_t pid;
@@ -154,93 +182,53 @@ int sq_execute(cmd_t* command) {
     int pipe_out[2] = {-1, -1};
 
     if (command->pipe == NULL) { // no pipeline, a builtin command should execute in main shell process
-        cmd = command->args[0];
-
-        // if builtin, call the function
-        for (int i = 0; i < NUM_BUILTINS; i++) { // FIXME: refactor to bring redirection into here as well (but right now my only bultins are cd and exit so it doesnt really matter)
-            if (strcmp(cmd, BUILTINS[i]) == 0) {
-                return (*BUILTIN_FUNCS[i])(command->args);
-            }
-        }
+        int res = sq_builtin(command);
+        if (res != -1) { return res; } // might be exit 0
 
         // else search for program in path directories and run in new process
         pid = fork();
         if (pid == 0) { // child process
-            int fd;
-            // handle redirection
-            if  (command->redirect_t) { // >
-                fd = open(command->redirect_t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                sq_dup(fd, STDOUT_FILENO);
-            } else if (command->redirect_a) { // >>
-                fd = open(command->redirect_a, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                sq_dup(fd, STDOUT_FILENO);
-            } else if (command->redirect_i) { // <
-                fd = open(command->redirect_i, O_RDONLY);
-                sq_dup(fd, STDIN_FILENO);
-            }
-
-            if (execvp(cmd, command->args) == -1) {
-                perror("failed to execute command");
-                exit(EXIT_FAILURE); // terminates child - does not quit main shell
-            }
+            sq_redirection(command);
+            sq_exec(command);
         } else if (pid < 0) { // forking error
             perror("failed to fork in command execution");
         }
-    } else { // there is a pipeline of 2+ commands - execute builtins in subshells
+    } else { // pipeline of 2+ commands - execute builtins in subshells
         while (command != NULL) { // 
-            cmd = command->args[0];
-            if (command->pipe != NULL) { // need to create pipe to next command
+            if (command->pipe != NULL) { // create pipe to next command
                 pipe(pipe_out);
             }
 
             pid = fork();
             if (pid == 0) { // child process
-                // handle pipeline
-                if (pipe_in[0] != -1) { // connect pipe from prev command
-                    close(pipe_in[1]); // close write end
-                    dup2(pipe_in[0], STDIN_FILENO); // stdin reads from pipe
+                if (pipe_in[0] != -1) { 
+                    close(pipe_in[1]); 
+                    dup2(pipe_in[0], STDIN_FILENO); // stdin reads from input pipe
                 }
-                if (pipe_out[0] != -1) { // connect pipe to next command
-                    close(pipe_out[0]); // close read end
-                    dup2(pipe_out[1], STDOUT_FILENO); // stdout writes to pipe
-                }
-
-                int fd;
-                // handle redirection
-                if  (command->redirect_t) { // >
-                    fd = open(command->redirect_t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    sq_dup(fd, STDOUT_FILENO);
-                } else if (command->redirect_a) { // >>
-                    fd = open(command->redirect_a, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                    sq_dup(fd, STDOUT_FILENO);
-                } else if (command->redirect_i) { // <
-                    fd = open(command->redirect_i, O_RDONLY);
-                    sq_dup(fd, STDIN_FILENO);
+                if (pipe_out[0] != -1) { 
+                    close(pipe_out[0]); 
+                    dup2(pipe_out[1], STDOUT_FILENO); // stdout writes to output pipe
                 }
 
-                // if builtin, call the function and return from child
-                for (int i = 0; i < NUM_BUILTINS; i++) {
-                    if (strcmp(cmd, BUILTINS[i]) == 0) {
-                        (*BUILTIN_FUNCS[i])(command->args);
-                        exit(EXIT_SUCCESS);
-                    }
+                sq_redirection(command);
+
+                if (sq_builtin(command) != -1) {
+                    exit(EXIT_SUCCESS);
                 }
 
-                if (execvp(cmd, command->args) == -1) {
-                    perror("failed to execute command");
-                    exit(EXIT_FAILURE); // terminates child - does not quit main shell
-                }
+                sq_exec(command);
             } else if (pid < 0) { // forking error
                 perror("failed to fork in command execution");
             }
 
+            // reading procs won't get EOF if fds still open anywhere (ie in the parent)
             if (pipe_in[0] != -1) { close(pipe_in[0]); close(pipe_in[1]); }
+
             pipe_in[0] = pipe_out[0], pipe_in[1] = pipe_out[1];
             pipe_out[0] = pipe_out[1] = -1;
-
             command = command->pipe;
         }
-        if (pipe_in[0] != -1) { close(pipe_in[0]); close(pipe_in[1]); } // make sure all fds are closed everywhere (in the parent too) - otherwise readings procs won't get EOF 
+        if (pipe_in[0] != -1) { close(pipe_in[0]); close(pipe_in[1]); } 
     }
 
     while(wait(NULL) != -1); // wait for all child processes to finish
