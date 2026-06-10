@@ -1,14 +1,14 @@
 #include "squish.h"
 
 /* 
-    TODO: add << (here-documents), <<< (here-strings)
-
-    FIXME: refactor error handling from scattered exits -> centralized cleanup
-    for graceful exit without memory leaks of regions whose pointers are out 
-    of scope
+    TODO:   << (here-documents), <<< (here-strings),
+            single and double quoting,
+            variable expansion,
 */
 
-void sq_reset(cmd_t* command) {
+void sq_reset(char* line, cmd_t* command) {
+    free(line);
+
     free(command->args);
     command->args = NULL; 
     command->redirect_t = command->redirect_a = command->redirect_i = NULL;
@@ -30,59 +30,62 @@ void sq_reset(cmd_t* command) {
 int main(int argc, char* argv[]) {
     char* line = NULL;
     cmd_t command = { NULL };
-    int status = 1;
+    status_t status = OK;
     char cwd[BUFSIZ];
 
     do {
         getcwd(cwd, BUFSIZ);
         printf("%s%s -~> %s", GREEN, cwd, RESET);
         
-        line = sq_read();
-        sq_parse(line, &command);
-        status = sq_execute(&command);
+        line = sq_read(&status);
+        if (status == OK) {
+            status = sq_parse(line, &command);
+            if (status == OK) {
+                status = sq_execute(&command);
+            }
+        }
+        
+        sq_reset(line, &command);
+    } while (status > 1);
 
-        free(line);
-        sq_reset(&command);
-    } while (status);
+    printf("%sbye squish!%s\n", GREEN, RESET);
+
+    return status;
 }
 
-char* sq_read(void) {
+char* sq_read(status_t* status) {
     char* line = NULL;
     size_t bufsize;
 
-    /* on failure to read, free line buffer and end shell process */
     if (getline(&line, &bufsize, stdin) == -1) {
-        if (feof(stdin)) { /* hit end of script file or user typed ctrl+d */
-            free(line); 
-            printf("%sbye squish!%s\n", GREEN, RESET);
-            exit(EXIT_SUCCESS); 
-        } else { /* some unexpected error */
-            free(line);
+        if (feof(stdin)) { // hit end of script file or user typed ctrl+d
+            *status = EXIT;
+        } else { 
             perror("failed to read command line");
-            exit(EXIT_FAILURE);
+            *status = CRASH;
         }
     }
 
     return line;
 }
 
-void sq_parse(char* line, cmd_t* command) {
-    size_t bufsize = BUFSIZ;
+status_t sq_parse(char* line, cmd_t* command) {
     char* delims = " \t\r\n\a";
-    char** args = malloc(BUFSIZ);
     char* token;
+    size_t bufsize = BUFSIZ;
+    command->args = malloc(BUFSIZ);
     int i = 0;
-
-    if (args == NULL) {
+    
+    if (command->args == NULL) {
         perror("failed to allocate memory for command line parsing");
-        exit(EXIT_FAILURE);
+        return CRASH;
     }
 
     // parse and terminate token list with NULL pointer
     token = strtok(line, delims);
     while (token != NULL) {
-        // FIXME: once error handling is sorted, quit command parsing/execution here if no token after redirection symbol
         if (strcmp(token, ">") == 0) { 
+            // FIXME: keep reading after redirection (eg. wc -w < hello.txt | ...)
             command->redirect_t = strtok(NULL, delims); 
             break;
         }
@@ -97,13 +100,7 @@ void sq_parse(char* line, cmd_t* command) {
 
         if (strcmp(token, "|") == 0) {
             // finish argv for pipe input command
-            args[i] = NULL;
-            command->args = args;
-
-            // reset for pipe output command
-            bufsize = BUFSIZ;
-            args = malloc(BUFSIZ);
-            i = 0;
+            command->args[i] = NULL;
 
             // establish pipe and proceed with next command
             cmd_t* next = malloc(sizeof(cmd_t));
@@ -111,40 +108,46 @@ void sq_parse(char* line, cmd_t* command) {
             command->pipe = next;
             command = next;
 
+            bufsize = BUFSIZ;
+            i = 0;
+            command->args = malloc(BUFSIZ);
+
             token = strtok(NULL, delims);
+            if (token == NULL) {}
             continue;
         }
 
-        args[i] = token;
+        command->args[i] = token;
 
         i++;
         if (i == bufsize) { // filled buffer, reallocate with more space
             bufsize *= 2;
-            char** new = realloc(args, bufsize);
+            char** new = realloc(command->args, bufsize);
             if (new == NULL) {
-                free(args);
                 perror("failed to reallocate memory for command line parsing");
-                exit(EXIT_FAILURE);
+                return CRASH;
             }
-            args = new;
+            command->args = new;
         }
 
         token = strtok(NULL, delims); // NULL -> continue on same str
     }
-    args[i] = NULL;
+    command->args[i] = NULL;
 
-    command->args = args;
+    return OK;
 }
 
-int sq_builtin(cmd_t* command) {
+// run from child OR main shell
+status_t sq_builtin(cmd_t* command) {
     for (int i = 0; i < NUM_BUILTINS; i++) {
         if (strcmp(command->args[0], BUILTINS[i]) == 0) {
             return (*BUILTIN_FUNCS[i])(command->args);
         }
     }
-    return -1;
+    return NOT_FOUND;
 }
 
+// run from child
 void sq_dup(int fd, int replace) {
     if (fd == -1) {
         perror("failed to open file for redirection");
@@ -154,6 +157,7 @@ void sq_dup(int fd, int replace) {
     close(fd);
 }
 
+// run from child
 void sq_redirection(cmd_t* command) {
     int fd;
     if  (command->redirect_t) { // >
@@ -168,30 +172,35 @@ void sq_redirection(cmd_t* command) {
     }
 }
 
+// run from child
 void sq_exec(cmd_t* command) {
     if (execvp(command->args[0], command->args) == -1) {
         perror("failed to execute command");
-        exit(EXIT_FAILURE); // terminates child - does not quit main shell
+        exit(EXIT_FAILURE); 
     }
 }
 
-int sq_execute(cmd_t* command) {
+status_t sq_execute(cmd_t* command) {
     char* cmd;
     pid_t pid;
     int pipe_in[2] = {-1, -1};
     int pipe_out[2] = {-1, -1};
 
     if (command->pipe == NULL) { // no pipeline, a builtin command should execute in main shell process
-        int res = sq_builtin(command);
-        if (res != -1) { return res; } // might be exit 0
+        status_t status = sq_builtin(command);
+        if (status != NOT_FOUND) {
+            return status;
+        }
 
         // else search for program in path directories and run in new process
         pid = fork();
         if (pid == 0) { // child process
             sq_redirection(command);
+
             sq_exec(command);
-        } else if (pid < 0) { // forking error
-            perror("failed to fork in command execution");
+        } else if (pid < 0) {
+            perror("forking error");
+            return RETRY;
         }
     } else { // pipeline of 2+ commands - execute builtins in subshells
         while (command != NULL) { // 
@@ -217,8 +226,9 @@ int sq_execute(cmd_t* command) {
                 }
 
                 sq_exec(command);
-            } else if (pid < 0) { // forking error
-                perror("failed to fork in command execution");
+            } else if (pid < 0) { 
+                perror("forking error");
+                return RETRY;
             }
 
             // reading procs won't get EOF if fds still open anywhere (ie in the parent)
@@ -231,13 +241,14 @@ int sq_execute(cmd_t* command) {
         if (pipe_in[0] != -1) { close(pipe_in[0]); close(pipe_in[1]); } 
     }
 
-    while(wait(NULL) != -1); // wait for all child processes to finish
+    // TODO: handle children exiting with failure (return appropriate status) 
+    while(wait(NULL) != -1); 
 
-    return 1; // commands done running. continue
+    return OK;
 }
 
 // https://man7.org/linux/man-pages/man1/cd.1p.html
-int sq_cd(char* args[]) {
+status_t sq_cd(char* args[]) {
     char* path;
     char old[BUFSIZ];
 
@@ -257,14 +268,15 @@ int sq_cd(char* args[]) {
     getcwd(old, BUFSIZ);
     if (chdir(path) == -1) { 
         perror("failed to change directory"); 
+        return RETRY;
     } else {
-        setenv("OLDPWD", old, 1); // FIXME: do anything if this fails?
+        setenv("OLDPWD", old, 1);
     }
 
-    return 1;
+    return OK;
 }
 
-int sq_exit(char* args[]) {
+status_t sq_exit(char* args[]) {
     printf("%sbye squish!%s\n", GREEN, RESET);
-    return 0;
+    return EXIT;
 }

@@ -16,20 +16,30 @@ typedef struct cmd_t {
     struct cmd_t* pipe; // next command in pipeline
 } cmd_t;
 
+typedef enum status_t {
+    EXIT,
+    CRASH,
+    RETRY,
+    OK,
+    NOT_FOUND
+} status_t;
+
 /** main loop */
 
-char* sq_read(void);
-void sq_parse(char* line, cmd_t* command); // change to return int later for error handling
-int sq_execute(cmd_t* command);
+char* sq_read(status_t* status);
+status_t sq_parse(char* line, cmd_t* command); // change to return int later for error handling
+status_t sq_execute(cmd_t* command);
 
 /** helpers */
-void sq_reset(cmd_t* command);
+void sq_reset(char* line, cmd_t* command);
 void sq_dup(int fd, int replace);
+void sq_redirection(cmd_t* command);
+void sq_exec(cmd_t* command);
 
 /** builtin commands */
 
-int sq_cd(char* args[]);
-int sq_exit(char* args[]);
+status_t sq_cd(char* args[]);
+status_t sq_exit(char* args[]);
 
 int NUM_BUILTINS = 2;
 char* BUILTINS[] = {
@@ -37,7 +47,7 @@ char* BUILTINS[] = {
     "exit",
 };
 
-int (*BUILTIN_FUNCS[]) (char* []) = {
+status_t (*BUILTIN_FUNCS[]) (char* []) = {
     &sq_cd,
     &sq_exit,
 };
