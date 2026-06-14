@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,12 @@ typedef enum status_t {
     OK,
     NOT_FOUND
 } status_t;
+
+typedef enum parse_state_t {
+    UNQUOTED,
+    DOUBLE_QUOTED,
+    SINGLE_QUOTED
+} parse_state_t;
 
 /** main loop */
 

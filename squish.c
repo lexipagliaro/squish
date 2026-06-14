@@ -2,7 +2,6 @@
 
 /* 
     TODO:   << (here-documents), <<< (here-strings),
-            single and double quoting,
             variable expansion,
 */
 
@@ -18,6 +17,11 @@ void sq_reset(char* line, cmd_t* command) {
     while (curr != NULL) {
         cmd_t *next = curr->pipe;
 
+        char* arg = curr->args[0];
+        while (arg != NULL) {
+            free(arg);
+            arg++;
+        }
         free(curr->args);
         free(curr);
 
@@ -69,6 +73,83 @@ char* sq_read(status_t* status) {
     return line;
 }
 
+/*  goal: have moved *line to the end of the token where we will begin looking for the next token (whitespace or NULL), 
+    and return back the pointer to the beginning of this token (mallloced, not in the original line, so that we can easily 
+    expand $variables and indiscriminately free every token allocation later w/out double freeing accidentally) */
+
+// returned memory must be freed
+char* sq_token(char** line) {
+    char* ch = *line; 
+    int bufsize = BUFSIZ;
+    char* tokenbuf = malloc(BUFSIZ);
+    int i = 0;
+
+    // skip leading whitespace
+    while (isspace(*ch)) {
+        ch++;
+    }
+
+    // if string has been fully parsed, return NULL
+    if (*ch == '\0') { free(tokenbuf); return NULL; }
+
+    // read this token until whitespace (outside of quotes) or null
+    parse_state_t state = UNQUOTED;
+    while (*ch != '\0') {
+        if (state == UNQUOTED) {
+            if (isspace(*ch)) { break; }
+            else if (*ch == '\\') {
+                ch++;
+                if (*ch == '$' || *ch == '"' || *ch == '`' || *ch == '\\') {
+                    tokenbuf[i] = *ch;
+                } else {
+                    ch--;
+                    tokenbuf[i] = '\\';
+                }
+                i++;
+            }
+            else if (*ch == '"') { state = DOUBLE_QUOTED; }
+            else if (*ch == '\'') { state = SINGLE_QUOTED; }
+            else { tokenbuf[i] = *ch; i++; }
+
+        } else if (state == DOUBLE_QUOTED) {
+            if (*ch == '\\') {
+                ch++;
+                if (*ch == '$' || *ch == '"' || *ch == '`' || *ch == '\\') {
+                    tokenbuf[i] = *ch;
+                } else {
+                    ch--;
+                    tokenbuf[i] = '\\';
+                }
+                i++;
+            }
+            else if (*ch == '"') { state = UNQUOTED; }
+            else { tokenbuf[i] = *ch; i++; }
+
+        } else if (state == SINGLE_QUOTED) {
+            if (*ch == '\'') { state = UNQUOTED; }
+            else { tokenbuf[i] = *ch; i++; }
+        }
+
+        if (i == bufsize) { // filled buffer, reallocate with more space
+            bufsize *= 2;
+            char* newbuf = realloc(tokenbuf, bufsize);
+            if (newbuf == NULL) {
+                perror("failed to reallocate memory for command line parsing");
+                exit(EXIT_FAILURE); // FIXME: crash gracefully (wrong return type rn)
+            }
+            tokenbuf = newbuf;
+        }
+
+        ch++;  
+    }
+    
+    // null terminate token string
+    tokenbuf[i] = '\0'; 
+
+    *line = ch; // only modifies the `line` local to sq_parse, not main
+    return tokenbuf;
+}
+
 status_t sq_parse(char* line, cmd_t* command) {
     char* delims = " \t\r\n\a";
     char* token;
@@ -82,19 +163,22 @@ status_t sq_parse(char* line, cmd_t* command) {
     }
 
     // parse and terminate token list with NULL pointer
-    token = strtok(line, delims);
+    token = sq_token(&line);
     while (token != NULL) {
         if (strcmp(token, ">") == 0) { 
-            // FIXME: keep reading after redirection (eg. wc -w < hello.txt | ...)
-            command->redirect_t = strtok(NULL, delims); 
+            // TODO: extend to keep reading after redirection (eg. wc -w < hello.txt | ...)
+            command->redirect_t = sq_token(&line); 
+            free(token);
             break;
         }
         if (strcmp(token, ">>") == 0) {
-            command->redirect_a = strtok(NULL, delims); 
+            command->redirect_a = sq_token(&line); 
+            free(token);
             break;
         }
         if (strcmp(token, "<") == 0) {
-            command->redirect_i = strtok(NULL, delims);
+            command->redirect_i = sq_token(&line); 
+            free(token);
             break;
         } 
 
@@ -103,7 +187,7 @@ status_t sq_parse(char* line, cmd_t* command) {
             command->args[i] = NULL;
 
             // establish pipe and proceed with next command
-            cmd_t* next = malloc(sizeof(cmd_t));
+            cmd_t* next = malloc(sizeof(cmd_t)); // FIXME: check for error
             memset(next, 0, sizeof(*next));
             command->pipe = next;
             command = next;
@@ -112,8 +196,8 @@ status_t sq_parse(char* line, cmd_t* command) {
             i = 0;
             command->args = malloc(BUFSIZ);
 
-            token = strtok(NULL, delims);
-            if (token == NULL) {}
+            free(token);
+            token = sq_token(&line);
             continue;
         }
 
@@ -130,7 +214,7 @@ status_t sq_parse(char* line, cmd_t* command) {
             command->args = new;
         }
 
-        token = strtok(NULL, delims); // NULL -> continue on same str
+        token = sq_token(&line); 
     }
     command->args[i] = NULL;
 
@@ -277,6 +361,5 @@ status_t sq_cd(char* args[]) {
 }
 
 status_t sq_exit(char* args[]) {
-    printf("%sbye squish!%s\n", GREEN, RESET);
     return EXIT;
 }
