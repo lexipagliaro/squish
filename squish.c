@@ -2,7 +2,9 @@
 
 /* 
     TODO:   << (here-documents), <<< (here-strings),
-            variable expansion,
+            DRY realloc in sq_token?,
+            sq_token error handling,
+            documentation,
 */
 
 void sq_reset(char* line, cmd_t* command) {
@@ -64,7 +66,8 @@ char* sq_read(status_t* status) {
     if (getline(&line, &bufsize, stdin) == -1) {
         if (feof(stdin)) { // hit end of script file or user typed ctrl+d
             *status = EXIT;
-        } else { 
+        } 
+        else { 
             perror("failed to read command line");
             *status = CRASH;
         }
@@ -73,11 +76,6 @@ char* sq_read(status_t* status) {
     return line;
 }
 
-/*  goal: have moved *line to the end of the token where we will begin looking for the next token (whitespace or NULL), 
-    and return back the pointer to the beginning of this token (mallloced, not in the original line, so that we can easily 
-    expand $variables and indiscriminately free every token allocation later w/out double freeing accidentally) */
-
-// returned memory must be freed
 char* sq_token(char** line) {
     char* ch = *line; 
     int bufsize = BUFSIZ;
@@ -95,37 +93,66 @@ char* sq_token(char** line) {
     // read this token until whitespace (outside of quotes) or null
     parse_state_t state = UNQUOTED;
     while (*ch != '\0') {
-        if (state == UNQUOTED) {
-            if (isspace(*ch)) { break; }
-            else if (*ch == '\\') {
-                ch++;
-                if (*ch == '$' || *ch == '"' || *ch == '`' || *ch == '\\') {
-                    tokenbuf[i] = *ch;
-                } else {
-                    ch--;
-                    tokenbuf[i] = '\\';
-                }
+        if (*ch == '$' && state != SINGLE_QUOTED) {
+            // ch points to beginning of variable name, ptr navigates to (one past) the end
+            ch++;
+            char* ptr = ch;
+            while (isalnum(*ptr) || *ptr == '_') {
+                ptr++;
+            }
+            int varlen = ptr - ch;
+
+            if (varlen == 0) { // eg. `echo $` shouldnt come up empty, should print `$`
+                tokenbuf[i] = '$';
                 i++;
             }
+            else {
+                // extract the variable name into memory as a null terminated string
+                char* var = malloc(varlen + 1);
+                memcpy(var, ch, varlen);
+                var[varlen] = '\0';
+
+                // get value of variable (if it exists) and append to token
+                char* value = getenv(var);
+                if (value != NULL) {
+                    int valuelen = strlen(value);
+                    while (valuelen > (bufsize - i)) {
+                        bufsize *= 2;
+                        char* newbuf = realloc(tokenbuf, bufsize);
+                        if (newbuf == NULL) {
+                            perror("failed to reallocate memory for command line parsing");
+                            exit(EXIT_FAILURE); // FIXME: crash gracefully (wrong return type rn)
+                        }
+                        tokenbuf = newbuf;
+                    }
+                    memcpy(tokenbuf + i, value, valuelen);
+                    i += valuelen;
+                }
+                free(var);
+            }
+            ch = ptr - 1;
+        } 
+        else if (*ch == '\\' && state != SINGLE_QUOTED) {
+            ch++;
+            if (*ch == '$' || *ch == '"' || *ch == '`' || *ch == '\\') {
+                tokenbuf[i] = *ch;
+            } else {
+                ch--;
+                tokenbuf[i] = '\\';
+            }
+            i++;
+        } 
+        else if (state == UNQUOTED) {
+            if (isspace(*ch)) { break; }
             else if (*ch == '"') { state = DOUBLE_QUOTED; }
             else if (*ch == '\'') { state = SINGLE_QUOTED; }
             else { tokenbuf[i] = *ch; i++; }
-
-        } else if (state == DOUBLE_QUOTED) {
-            if (*ch == '\\') {
-                ch++;
-                if (*ch == '$' || *ch == '"' || *ch == '`' || *ch == '\\') {
-                    tokenbuf[i] = *ch;
-                } else {
-                    ch--;
-                    tokenbuf[i] = '\\';
-                }
-                i++;
-            }
-            else if (*ch == '"') { state = UNQUOTED; }
+        } 
+        else if (state == DOUBLE_QUOTED) {
+            if (*ch == '"') { state = UNQUOTED; }
             else { tokenbuf[i] = *ch; i++; }
-
-        } else if (state == SINGLE_QUOTED) {
+        } 
+        else if (state == SINGLE_QUOTED) {
             if (*ch == '\'') { state = UNQUOTED; }
             else { tokenbuf[i] = *ch; i++; }
         }
@@ -171,12 +198,12 @@ status_t sq_parse(char* line, cmd_t* command) {
             free(token);
             break;
         }
-        if (strcmp(token, ">>") == 0) {
+        else if (strcmp(token, ">>") == 0) {
             command->redirect_a = sq_token(&line); 
             free(token);
             break;
         }
-        if (strcmp(token, "<") == 0) {
+        else if (strcmp(token, "<") == 0) {
             command->redirect_i = sq_token(&line); 
             free(token);
             break;
@@ -247,10 +274,12 @@ void sq_redirection(cmd_t* command) {
     if  (command->redirect_t) { // >
         fd = open(command->redirect_t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         sq_dup(fd, STDOUT_FILENO);
-    } else if (command->redirect_a) { // >>
+    } 
+    else if (command->redirect_a) { // >>
         fd = open(command->redirect_a, O_WRONLY | O_CREAT | O_APPEND, 0644);
         sq_dup(fd, STDOUT_FILENO);
-    } else if (command->redirect_i) { // <
+    } 
+    else if (command->redirect_i) { // <
         fd = open(command->redirect_i, O_RDONLY);
         sq_dup(fd, STDIN_FILENO);
     }
@@ -286,7 +315,8 @@ status_t sq_execute(cmd_t* command) {
             perror("forking error");
             return RETRY;
         }
-    } else { // pipeline of 2+ commands - execute builtins in subshells
+    } 
+    else { // pipeline of 2+ commands - execute builtins in subshells
         while (command != NULL) { // 
             if (command->pipe != NULL) { // create pipe to next command
                 pipe(pipe_out);
@@ -339,13 +369,16 @@ status_t sq_cd(char* args[]) {
     if (args[1] == NULL && getenv("HOME") == NULL) { 
         // 1. if no directory given and HOME env variable is not defined
         return 1; 
-    } else if (args[1] == NULL) { 
+    } 
+    else if (args[1] == NULL) { 
         // 2. else if no directory given, change directory to HOME
         path = getenv("HOME"); 
-    } else if (args[1] != NULL && strcmp(args[1], "-") == 0) {
+    } 
+    else if (args[1] != NULL && strcmp(args[1], "-") == 0) {
         // support cd - to return to previous wd
         path = getenv("OLDPWD");
-    } else {
+    } 
+    else {
         path = args[1];
     }
 
@@ -353,7 +386,8 @@ status_t sq_cd(char* args[]) {
     if (chdir(path) == -1) { 
         perror("failed to change directory"); 
         return RETRY;
-    } else {
+    } 
+    else {
         setenv("OLDPWD", old, 1);
     }
 
