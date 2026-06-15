@@ -10,32 +10,36 @@
 void sq_reset(char* line, cmd_t* command) {
     free(line);
 
-    free(command->args);
-    command->args = NULL; 
-    command->redirect_t = command->redirect_a = command->redirect_i = NULL;
-
     // free subsequent heap allocated command structs (and their args)
-    cmd_t *curr = command->pipe;
+    cmd_t *curr = command;
     while (curr != NULL) {
         cmd_t *next = curr->pipe;
 
-        char* arg = curr->args[0];
-        while (arg != NULL) {
-            free(arg);
-            arg++;
+        if (curr->args != NULL) {
+            int i = 0;
+            while (curr->args[i] != NULL) {
+                free(curr->args[i]);
+                i++;
+            }   
+            free(curr->args);    
         }
-        free(curr->args);
-        free(curr);
-
+        free(curr->redirect_a);
+        free(curr->redirect_i);
+        free(curr->redirect_t);
+        if (curr != command) {
+            free(curr);
+        }
+    
         curr = next;
     }
-
+    command->args = NULL; 
+    command->redirect_t = command->redirect_a = command->redirect_i = NULL;
     command->pipe = NULL;
 }
 
-int main(int argc, char* argv[]) {
+int main(void) {
     char* line = NULL;
-    cmd_t command = { NULL };
+    cmd_t command = { 0 };
     status_t status = OK;
     char cwd[BUFSIZ];
 
@@ -76,10 +80,15 @@ char* sq_read(status_t* status) {
     return line;
 }
 
+// FIXME: crash gracefully (wrong return type rn)
 char* sq_token(char** line) {
     char* ch = *line; 
     int bufsize = BUFSIZ;
     char* tokenbuf = malloc(BUFSIZ);
+    if (tokenbuf == NULL) {
+        perror("failed to allocate memory for tokenization");
+        exit(EXIT_FAILURE);
+    }
     int i = 0;
 
     // skip leading whitespace
@@ -109,6 +118,11 @@ char* sq_token(char** line) {
             else {
                 // extract the variable name into memory as a null terminated string
                 char* var = malloc(varlen + 1);
+                if (var == NULL) {
+                    perror("failed to allocate memory for variable expansion");
+                    free(tokenbuf);
+                    exit(EXIT_FAILURE);
+                }
                 memcpy(var, ch, varlen);
                 var[varlen] = '\0';
 
@@ -120,8 +134,10 @@ char* sq_token(char** line) {
                         bufsize *= 2;
                         char* newbuf = realloc(tokenbuf, bufsize);
                         if (newbuf == NULL) {
-                            perror("failed to reallocate memory for command line parsing");
-                            exit(EXIT_FAILURE); // FIXME: crash gracefully (wrong return type rn)
+                            perror("failed to reallocate memory for variable expansion");
+                            free(tokenbuf);
+                            free(var);
+                            exit(EXIT_FAILURE); 
                         }
                         tokenbuf = newbuf;
                     }
@@ -161,8 +177,9 @@ char* sq_token(char** line) {
             bufsize *= 2;
             char* newbuf = realloc(tokenbuf, bufsize);
             if (newbuf == NULL) {
-                perror("failed to reallocate memory for command line parsing");
-                exit(EXIT_FAILURE); // FIXME: crash gracefully (wrong return type rn)
+                perror("failed to reallocate memory for tokenization");
+                free(tokenbuf);
+                exit(EXIT_FAILURE);
             }
             tokenbuf = newbuf;
         }
@@ -178,43 +195,47 @@ char* sq_token(char** line) {
 }
 
 status_t sq_parse(char* line, cmd_t* command) {
-    char* delims = " \t\r\n\a";
     char* token;
-    size_t bufsize = BUFSIZ;
+    int bufsize = BUFSIZ;
     command->args = malloc(BUFSIZ);
-    int i = 0;
-    
     if (command->args == NULL) {
         perror("failed to allocate memory for command line parsing");
         return CRASH;
     }
+    command->args[0] = NULL;
+    int i = 0;
 
-    // parse and terminate token list with NULL pointer
+    // parse and terminate token list with NULL pointer (at all stages of parsing, to keep sq_reset memory safe)
     token = sq_token(&line);
     while (token != NULL) {
         if (strcmp(token, ">") == 0) { 
-            // TODO: extend to keep reading after redirection (eg. wc -w < hello.txt | ...)
-            command->redirect_t = sq_token(&line); 
             free(token);
-            break;
+            command->redirect_t = sq_token(&line); 
+            token = sq_token(&line);
+            continue;
         }
         else if (strcmp(token, ">>") == 0) {
-            command->redirect_a = sq_token(&line); 
             free(token);
-            break;
+            command->redirect_a = sq_token(&line); 
+            token = sq_token(&line);
+            continue;
         }
         else if (strcmp(token, "<") == 0) {
-            command->redirect_i = sq_token(&line); 
             free(token);
-            break;
+            command->redirect_i = sq_token(&line); 
+            token = sq_token(&line);
+            continue;
         } 
 
         if (strcmp(token, "|") == 0) {
-            // finish argv for pipe input command
-            command->args[i] = NULL;
+            free(token);
 
             // establish pipe and proceed with next command
-            cmd_t* next = malloc(sizeof(cmd_t)); // FIXME: check for error
+            cmd_t* next = malloc(sizeof(cmd_t)); 
+            if (next == NULL) {
+                perror("failed to allocate memory for command line parsing");
+                return CRASH;
+            }
             memset(next, 0, sizeof(*next));
             command->pipe = next;
             command = next;
@@ -222,16 +243,21 @@ status_t sq_parse(char* line, cmd_t* command) {
             bufsize = BUFSIZ;
             i = 0;
             command->args = malloc(BUFSIZ);
+            if (command->args == NULL) {
+                perror("failed to allocate memory for command line parsing");
+                return CRASH;
+            }
+            command->args[0] = NULL;
 
-            free(token);
             token = sq_token(&line);
             continue;
         }
 
         command->args[i] = token;
+        command->args[i + 1] = NULL;
 
         i++;
-        if (i == bufsize) { // filled buffer, reallocate with more space
+        if (i == bufsize - 1) { // filled buffer, reallocate with more space
             bufsize *= 2;
             char** new = realloc(command->args, bufsize);
             if (new == NULL) {
@@ -243,7 +269,6 @@ status_t sq_parse(char* line, cmd_t* command) {
 
         token = sq_token(&line); 
     }
-    command->args[i] = NULL;
 
     return OK;
 }
@@ -294,7 +319,6 @@ void sq_exec(cmd_t* command) {
 }
 
 status_t sq_execute(cmd_t* command) {
-    char* cmd;
     pid_t pid;
     int pipe_in[2] = {-1, -1};
     int pipe_out[2] = {-1, -1};
@@ -335,7 +359,7 @@ status_t sq_execute(cmd_t* command) {
 
                 sq_redirection(command);
 
-                if (sq_builtin(command) != -1) {
+                if (sq_builtin(command) != NOT_FOUND) {
                     exit(EXIT_SUCCESS);
                 }
 
@@ -395,5 +419,6 @@ status_t sq_cd(char* args[]) {
 }
 
 status_t sq_exit(char* args[]) {
+    (void) args;
     return EXIT;
 }
