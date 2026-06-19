@@ -1,9 +1,7 @@
 #include "squish.h"
 
 /* 
-    TODO:   << (here-documents), <<< (here-strings),
-            DRY realloc in sq_token?,
-            sq_token error handling,
+    TODO:   DRY realloc in sq_token?,
             documentation,
 */
 
@@ -44,6 +42,7 @@ int main(void) {
     char cwd[BUFSIZ];
 
     do {
+        status = OK;
         getcwd(cwd, BUFSIZ);
         printf("%s%s -~> %s", GREEN, cwd, RESET);
         
@@ -80,14 +79,14 @@ char* sq_read(status_t* status) {
     return line;
 }
 
-// FIXME: crash gracefully (wrong return type rn)
-char* sq_token(char** line) {
+status_t sq_token(char** line, char** token) {
     char* ch = *line; 
     int bufsize = BUFSIZ;
     char* tokenbuf = malloc(BUFSIZ);
     if (tokenbuf == NULL) {
         perror("failed to allocate memory for tokenization");
-        exit(EXIT_FAILURE);
+        *token = NULL;
+        return CRASH;
     }
     int i = 0;
 
@@ -97,7 +96,11 @@ char* sq_token(char** line) {
     }
 
     // if string has been fully parsed, return NULL
-    if (*ch == '\0') { free(tokenbuf); return NULL; }
+    if (*ch == '\0') { 
+        free(tokenbuf); 
+        *token = NULL; 
+        return OK;
+    }
 
     // read this token until whitespace (outside of quotes) or null
     parse_state_t state = UNQUOTED;
@@ -121,7 +124,8 @@ char* sq_token(char** line) {
                 if (var == NULL) {
                     perror("failed to allocate memory for variable expansion");
                     free(tokenbuf);
-                    exit(EXIT_FAILURE);
+                    *token = NULL;
+                    return CRASH;
                 }
                 memcpy(var, ch, varlen);
                 var[varlen] = '\0';
@@ -137,7 +141,8 @@ char* sq_token(char** line) {
                             perror("failed to reallocate memory for variable expansion");
                             free(tokenbuf);
                             free(var);
-                            exit(EXIT_FAILURE); 
+                            *token = NULL;
+                            return CRASH;
                         }
                         tokenbuf = newbuf;
                     }
@@ -179,7 +184,8 @@ char* sq_token(char** line) {
             if (newbuf == NULL) {
                 perror("failed to reallocate memory for tokenization");
                 free(tokenbuf);
-                exit(EXIT_FAILURE);
+                *token = NULL;
+                return CRASH;
             }
             tokenbuf = newbuf;
         }
@@ -191,7 +197,8 @@ char* sq_token(char** line) {
     tokenbuf[i] = '\0'; 
 
     *line = ch; // only modifies the `line` local to sq_parse, not main
-    return tokenbuf;
+    *token = tokenbuf;
+    return OK;
 }
 
 status_t sq_parse(char* line, cmd_t* command) {
@@ -206,29 +213,32 @@ status_t sq_parse(char* line, cmd_t* command) {
     int i = 0;
 
     // parse and terminate token list with NULL pointer (at all stages of parsing, to keep sq_reset memory safe)
-    token = sq_token(&line);
+    status_t token_status = sq_token(&line, &token);
     while (token != NULL) {
+        char** redir = NULL;
         if (strcmp(token, ">") == 0) { 
-            free(token);
-            command->redirect_t = sq_token(&line); 
-            token = sq_token(&line);
-            continue;
+            redir = &command->redirect_t;
         }
         else if (strcmp(token, ">>") == 0) {
-            free(token);
-            command->redirect_a = sq_token(&line); 
-            token = sq_token(&line);
-            continue;
+            redir = &command->redirect_a;
         }
         else if (strcmp(token, "<") == 0) {
-            free(token);
-            command->redirect_i = sq_token(&line); 
-            token = sq_token(&line);
-            continue;
+            redir = &command->redirect_i;
         } 
+        if (redir) {
+            free(token);
+            token_status = sq_token(&line, redir);
+            if (token_status != OK) { return token_status; }
+            if (*redir == NULL) {
+                perror("failed to parse redirection");
+                return RETRY;
+            }
+            token_status = sq_token(&line, &token);
+            continue;
+        }
 
         if (strcmp(token, "|") == 0) {
-            free(token);
+            free(token); 
 
             // establish pipe and proceed with next command
             cmd_t* next = malloc(sizeof(cmd_t)); 
@@ -249,7 +259,7 @@ status_t sq_parse(char* line, cmd_t* command) {
             }
             command->args[0] = NULL;
 
-            token = sq_token(&line);
+            token_status = sq_token(&line, &token);
             continue;
         }
 
@@ -267,10 +277,10 @@ status_t sq_parse(char* line, cmd_t* command) {
             command->args = new;
         }
 
-        token = sq_token(&line); 
+        token_status = sq_token(&line, &token); 
     }
 
-    return OK;
+    return token_status;
 }
 
 // run from child OR main shell
